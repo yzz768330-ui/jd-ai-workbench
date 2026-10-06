@@ -12,7 +12,7 @@
 - TailwindCSS 用于匹配报告页的布局和组件样式
 - 消息复制、删除、编辑后重新提问、重新生成
 - `txt`、`md`、`csv`、`json`、`pdf`、`docx` 文件解析
-- PDF 优先使用 `pdf-parse`，扫描版 PDF 自动使用 `pdfjs-dist` 渲染并由 `tesseract.js` OCR；DOCX 使用 `mammoth`；附件上下文最多保留 16000 个字符，并尽量保留文档开头和结尾
+- PDF 智能解析：优先文本层提取；扫描版自动使用多模态 AI（Qwen-VL/GPT-4o/Claude）或 Tesseract OCR
 - Markdown、表格和代码块展示
 - 聊天历史在浏览器中完整保留，但前端请求和服务端发往模型的上下文都限制为 24000 个字符，优先保留首条附件、最近问题和较新的中间消息
 - 八股题库检索：按岗位方向筛选，由 Atlas Vector Search 召回语义相近题目，结合关键词加权排序，再由 AI 基于命中题目生成解释
@@ -48,6 +48,12 @@ EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
 EMBEDDING_MODEL=BAAI/bge-m3
 MONGODB_VECTOR_INDEX=quiz_question_embedding
 MONGODB_DNS_SERVERS=223.5.5.5,223.6.6.6
+
+# 多模态 PDF 解析（可选）
+ENABLE_MULTI_MODAL=true
+QWEN_API_KEY=your_dashscope_key  # 推荐：中文效果好、成本低
+OPENAI_API_KEY=your_openai_key   # GPT-4o：效果最佳但贵
+CLAUDE_API_KEY=your_claude_key   # Claude 3.5：平衡方案
 ```
 
 八股题库使用 MongoDB Atlas Vector Search。请在实际存储数据的 `quizquestions` 集合创建名为 `quiz_question_embedding` 的向量索引：`embedding` 为 1024 维 cosine 向量字段，`status` 和 `direction` 为 filter 字段。首次八股检索会初始化审核通过的前端、Node 和 AI 应用种子题库，并通过 `.env` 配置的 embedding 服务写入题目向量。

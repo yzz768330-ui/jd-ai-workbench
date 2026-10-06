@@ -1,7 +1,9 @@
 node_modules/
 dist/
 .env
+.env.production
 uploads/
 .qoder/
 *.log
 reports/
+*.zip

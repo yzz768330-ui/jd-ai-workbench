@@ -2,6 +2,10 @@ import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
 import type { MatchReport } from "../src/types";
 
+
+//使用 Zod 定义严格的输出 Schema
+//LangChain 的 withStructuredOutput 会利用这个 Schema 
+// 来验证模型返回的内容是否符合预期，不符合则抛出错误。
 const matchReportSchema = z.object({
   summary: z.string(),
   matchScore: z.number().min(0).max(100),
@@ -49,11 +53,14 @@ export async function generateMatchReport(
     },
   });
 
+  //method: "jsonMode" 告诉 LangChain 使用 DeepSeek 支持的 JSON 模式（相当于设置 response_format: { type: "json_object" }）
   const structuredModel = model.withStructuredOutput(matchReportSchema, {
     name: "jd_match_report",
     method: "jsonMode",
   });
 
+
+  //
   const result = await structuredModel.invoke([
     {
       role: "system",

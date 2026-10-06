@@ -19,6 +19,7 @@ export type Session = {
 export type ParsedFile = {
   fileName: string;
   text: string;
+  method?: "text" | "multimodal" | "ocr"; // 返回使用的解析方式
 };
 
 /** 简历与 JD 匹配报告中的单项技能信息。 */
@@ -38,7 +39,11 @@ export type MatchReport = {
   scoreBreakdown: Array<{ category: string; score: number }>;
   skills: SkillMatch[];
   missingSkills: string[];
-  interviewQuestions: Array<{ question: string; reason: string; difficulty: string }>;
+  interviewQuestions: Array<{
+    question: string;
+    reason: string;
+    difficulty: string;
+  }>;
   actionPlan: string[];
 };
 

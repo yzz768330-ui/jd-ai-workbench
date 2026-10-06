@@ -3,6 +3,8 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import type { AnalysisHistoryItem, MatchReport, Message, Model, Session } from "./types";
 
 /** Creates a blank session used when the user first opens the workbench. */
+//这是什么意思
+//
 function createBlankSession(): Session {
   const now = Date.now();
   return {
@@ -75,8 +77,12 @@ export const useChatStore = create<ChatState>()(
           }),
         }));
       },
+
+        //用于替换指定会话中指定消息的内容，并更新该会话的更新时间。
+        //这里的set是Zustand提供的一个函数，用于更新全局状态。
+        // 它接收一个函数作为参数，这个函数的参数是当前的状态(state)，
+        // 返回一个新的状态对象。
       replaceMessage: (sessionId, messageId, content) => {
-        // Reuses this operation for both streamed chunks and edited user text.
         set((state) => ({
           sessions: state.sessions.map((session) =>
             session.id === sessionId
@@ -85,16 +91,16 @@ export const useChatStore = create<ChatState>()(
           ),
         }));
       },
+      //这个方法是用于从指定会话中删除消息的
       removeMessage: (sessionId, messageId) => {
-        // Removes only the message selected by the user.
         set((state) => ({
           sessions: state.sessions.map((session) =>
             session.id === sessionId ? { ...session, messages: session.messages.filter((message) => message.id !== messageId), updatedAt: Date.now() } : session,
           ),
         }));
       },
+      //用于删除指定会话中某条消息之后的所有消息。
       removeMessagesAfter: (sessionId, messageId) => {
-        // Discards an obsolete answer chain before an edited message is resent.
         set((state) => ({
           sessions: state.sessions.map((session) => {
             if (session.id !== sessionId) return session;

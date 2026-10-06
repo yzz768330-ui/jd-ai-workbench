@@ -15,6 +15,7 @@ import { Analysis } from "./models/Analysis";
 import { QuizConversation, QuizQuota, QuizRecord } from "./models/QuizRecord";
 import { dailyFreeLimit, generateQuizAnswer, searchQuestionBank } from "./quiz";
 import type { QuizDirection, QuizMessage } from "../src/types";
+import { parsePdfWithMultimodalAI } from "./parsing/multimodal";
 
 dotenv.config();
 
@@ -31,19 +32,47 @@ const maxOcrPages = 8;
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-/** 使用 OCR 识别没有文本层的扫描版 PDF，最多处理前 8 页。 */
-async function extractPdfTextWithOcr(buffer: Buffer): Promise<string> {
-  const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
+/**
+ * 使用多模态 AI 或 OCR 识别没有文本层的扫描版 PDF
+ * @returns { text: string, method: 'multimodal' | 'ocr' } 返回解析结果和使用的解析方式
+ */
+async function extractPdfTextWithOcr(
+  buffer: Buffer,
+): Promise<{ text: string; method: "multimodal" | "ocr" }> {
+  const multimodalEnabled = process.env.ENABLE_MULTI_MODAL === "true";
+  let multimodalResult: { text: string; method: "multimodal" } | null = null;
+
+  // 尝试多模态 AI 解析
+  if (multimodalEnabled) {
+    try {
+      multimodalResult = await parsePdfWithMultimodalAI(buffer);
+      console.log("✅ 多模态 AI 解析成功");
+      return multimodalResult;
+    } catch (multimodalError) {
+      console.warn(`⚠️ 多模态解析失败，降级到 OCR：${multimodalError.message}`);
+    }
+  }
+
+  // 兜底：Tesseract OCR
   const worker = await createWorker("chi_sim+eng");
+  const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
   const pageTexts: string[] = [];
 
   try {
-    for (let pageNumber = 1; pageNumber <= Math.min(pdf.numPages, maxOcrPages); pageNumber += 1) {
+    for (
+      let pageNumber = 1;
+      pageNumber <= Math.min(pdf.numPages, maxOcrPages);
+      pageNumber += 1
+    ) {
       const page = await pdf.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 1.5 });
-      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      const canvas = createCanvas(
+        Math.ceil(viewport.width),
+        Math.ceil(viewport.height),
+      );
       const canvasContext = canvas.getContext("2d");
-      await page.render({ canvasContext: canvasContext as never, viewport }).promise;
+      await page.render({ canvasContext: canvasContext as never, viewport })
+        .promise;
       const result = await worker.recognize(canvas.toBuffer("image/png"));
       if (result.data.text.trim()) pageTexts.push(result.data.text.trim());
       page.cleanup();
@@ -53,26 +82,36 @@ async function extractPdfTextWithOcr(buffer: Buffer): Promise<string> {
     await pdf.destroy();
   }
 
-  return pageTexts.join("\n\n");
+  return {
+    text: pageTexts.join("\n\n"),
+    method: "ocr",
+  };
 }
 
-/** 从上传的 JD 附件中提取可读文本，扫描版 PDF 无文本层时切换到 OCR。 */
-async function extractFileText(file: Express.Multer.File): Promise<string> {
+/** 从上传的 JD 附件中提取可读文本，扫描版 PDF 无文本层时切换到多模态 AI 或 OCR。 */
+async function extractFileText(
+  file: Express.Multer.File,
+): Promise<{ text: string; method: "text" | "multimodal" | "ocr" }> {
   const extension = path.extname(file.originalname).toLowerCase();
 
   if (supportedTextExtensions.has(extension)) {
-    return file.buffer.toString("utf-8");
+    return { text: file.buffer.toString("utf-8"), method: "text" };
   }
 
   if (extension === ".pdf") {
     const result = await pdfParse(file.buffer);
-    if (result.text.replace(/\s/g, "").length >= 80) return result.text;
-    return extractPdfTextWithOcr(file.buffer);
+    if (result.text.replace(/\s/g, "").length >= 80) {
+      return { text: result.text, method: "text" };
+    }
+
+    // 扫描版 PDF，使用 AI 解析
+    const aiResult = await extractPdfTextWithOcr(file.buffer);
+    return aiResult;
   }
 
   if (extension === ".docx") {
     const result = await mammoth.extractRawText({ buffer: file.buffer });
-    return result.value;
+    return { text: result.value, method: "text" };
   }
 
   throw new Error("仅支持 txt、md、csv、json、pdf 和 docx 文件。");
@@ -85,10 +124,14 @@ function limitContextText(text: string, limit: number) {
   const marker = "\n\n[中间内容已省略，仅保留文档开头和结尾]\n\n";
   const remaining = Math.max(0, limit - marker.length);
   const headLength = Math.ceil(remaining * 0.65);
-  return normalized.slice(0, headLength) + marker + normalized.slice(-(remaining - headLength));
+  return (
+    normalized.slice(0, headLength) +
+    marker +
+    normalized.slice(-(remaining - headLength))
+  );
 }
 
-/** 解析单个文件并返回受控长度的聊天上下文。 */
+/** 解析单个文件并返回受控长度的聊天上下文，附带解析方式信息。 */
 app.post("/api/files/parse", upload.single("file"), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ message: "请选择一个文件。" });
@@ -96,10 +139,13 @@ app.post("/api/files/parse", upload.single("file"), async (req, res) => {
   }
 
   try {
-    const text = await extractFileText(req.file);
+    const { text, method } = await extractFileText(req.file);
+    console.log(`📄 文件解析完成 [方法：${method}] ${req.file.originalname}`);
+
     res.json({
       fileName: req.file.originalname,
       text: limitContextText(text, maxFileContextChars),
+      method, // 返回使用的解析方式，前端显示给用户
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "文件解析失败。";
@@ -444,15 +490,20 @@ function selectChatMessages(
 
   const firstMessage = messages[0];
   const latestMessage = messages[messages.length - 1];
-  const selected = latestMessage === firstMessage ? [firstMessage] : [firstMessage, latestMessage];
+  const selected =
+    latestMessage === firstMessage
+      ? [firstMessage]
+      : [firstMessage, latestMessage];
   let usedChars = selected.reduce(
-    (total, message) => total + message.content.length + (message.attachmentText?.length ?? 0),
+    (total, message) =>
+      total + message.content.length + (message.attachmentText?.length ?? 0),
     0,
   );
 
   for (let index = messages.length - 2; index > 0; index -= 1) {
     const message = messages[index];
-    const messageChars = message.content.length + (message.attachmentText?.length ?? 0);
+    const messageChars =
+      message.content.length + (message.attachmentText?.length ?? 0);
     if (usedChars + messageChars > maxChatContextChars) continue;
     selected.splice(1, 0, message);
     usedChars += messageChars;
@@ -469,25 +520,49 @@ function formatChatMessage(message: {
   attachmentText?: string;
 }) {
   return message.attachmentText
-    ? message.content + "\n\n[附件：" + (message.fileName ?? "未命名文件") + "]\n" + message.attachmentText
+    ? message.content +
+        "\n\n[附件：" +
+        (message.fileName ?? "未命名文件") +
+        "]\n" +
+        message.attachmentText
     : message.content;
 }
 
 /** 在总预算内优先保留首条消息、最近消息和较新的中间消息。 */
 function fitChatContext(messages: ReturnType<typeof selectChatMessages>) {
-  const formatted = messages.map((message) => ({ role: message.role, content: formatChatMessage(message) }));
+  const formatted = messages.map((message) => ({
+    role: message.role,
+    content: formatChatMessage(message),
+  }));
   if (formatted.length <= 1) {
-    return formatted.map((message) => ({ ...message, content: limitContextText(message.content, maxChatContextChars) }));
+    return formatted.map((message) => ({
+      ...message,
+      content: limitContextText(message.content, maxChatContextChars),
+    }));
   }
 
   const firstBudget = Math.floor(maxChatContextChars / 3);
   const latestBudget = Math.floor(maxChatContextChars / 3);
-  const first = { ...formatted[0], content: limitContextText(formatted[0].content, firstBudget) };
-  const latest = { ...formatted[formatted.length - 1], content: limitContextText(formatted[formatted.length - 1].content, latestBudget) };
-  let remaining = maxChatContextChars - first.content.length - latest.content.length;
+  const first = {
+    ...formatted[0],
+    content: limitContextText(formatted[0].content, firstBudget),
+  };
+  const latest = {
+    ...formatted[formatted.length - 1],
+    content: limitContextText(
+      formatted[formatted.length - 1].content,
+      latestBudget,
+    ),
+  };
+  let remaining =
+    maxChatContextChars - first.content.length - latest.content.length;
   const middle: Array<{ role: "user" | "assistant"; content: string }> = [];
 
-  for (let index = formatted.length - 2; index > 0 && remaining > 0; index -= 1) {
+  for (
+    let index = formatted.length - 2;
+    index > 0 && remaining > 0;
+    index -= 1
+  ) {
     const content = limitContextText(formatted[index].content, remaining);
     if (!content) continue;
     middle.unshift({ ...formatted[index], content });

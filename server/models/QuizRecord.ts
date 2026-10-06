@@ -1,12 +1,14 @@
 import mongoose, { Schema } from "mongoose";
 import type { QuizDirection, QuizMessage, QuizQuestion } from "../../src/types";
 
+
+//对每次成功检索后的每一条保存记录
 export type QuizRecordDocument = {
-  clientId: string;
-  query: string;
-  direction: QuizDirection;
-  company?: string;
-  scenario?: string;
+  clientId: string;  //这里还是浏览器第一次打开的时候生成的uuid
+  query: string;   //用户输入的原始的问题
+  direction: QuizDirection;  //岗位方向（必填，默认前端）
+  company?: string;   //公司和筛选条件
+  scenario?: string;   //
   records: QuizQuestion[];
   answer: string;
   createdAt: Date;

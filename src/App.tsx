@@ -18,7 +18,6 @@ import {
 } from "lucide-react";
 import { useChatStore } from "./store";
 import { MatchReportView } from "./components/MatchReportView";
-import { QuizSearchView } from "./components/QuizSearchView";
 import type {
   AnalysisHistoryItem,
   MatchReport,
@@ -34,32 +33,10 @@ const modelNames: Record<Model, string> = {
   "deepseek-reasoner": "DeepSeek Reasoner",
 };
 
-const maxChatRequestChars = 24000;
-
-/** 发送聊天请求前限制历史消息体积，保留首条消息和最近消息。 */
-function selectChatRequestMessages(messages: Message[]) {
-  if (messages.length <= 1) return messages;
-
-  const first = messages[0];
-  const latest = messages[messages.length - 1];
-  const messageSize = (message: Message) => message.content.length + (message.attachmentText?.length ?? 0);
-  const selected = [first];
-  let usedChars = messageSize(first);
-
-  for (let index = 1; index < messages.length - 1; index += 1) {
-    const message = messages[index];
-    const size = messageSize(message);
-    if (usedChars + size > maxChatRequestChars) continue;
-    selected.push(message);
-    usedChars += size;
-  }
-
-  if (!selected.includes(latest)) selected.push(latest);
-  return selected;
-}
-
 /**
  * 读取 DeepSeek 的 SSE 流式响应，并将每一段文本追加到当前消息内容中。
+ * 这里不会循环请求接口，后端流式返回多个小片段，
+ * 前端通过回调函数 append 将它们拼接到当前助手消息中。
  */
 async function readStream(
   response: Response,
@@ -205,7 +182,7 @@ export default function App() {
 
   // 侧边栏和视图切换状态。
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [activeView, setActiveView] = useState<"chat" | "match" | "quiz">("chat");
+  const [activeView, setActiveView] = useState<"chat" | "match">("chat");
 
   // 简历和岗位匹配数据状态。
   const [resumeFileName, setResumeFileName] = useState("");
@@ -216,6 +193,7 @@ export default function App() {
   const [matchError, setMatchError] = useState("");
 
   // 生成稳定的客户端标识，用于区分不同浏览器会话的历史分析记录。
+  // clientId 在浏览器第一次打开时生成UUID,用来区分不同浏览器的检索记录和每日额度。
   const [clientId] = useState(() => {
     const storageKey = "jd-ai-client-id";
     const existing = localStorage.getItem(storageKey);
@@ -436,10 +414,7 @@ export default function App() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: session.model,
-          messages: selectChatRequestMessages(messages),
-        }),
+        body: JSON.stringify({ model: session.model, messages }),
       });
       if (!response.ok) {
         const data = (await response.json()) as { message?: string };
@@ -500,33 +475,42 @@ export default function App() {
     };
     let requestMessages: Message[];
 
-    // 情况一、编辑旧消息重新发送
-    //     / 找到被找到被编辑的那条消息的位置
-    // 把它替换成新内容
-    // 删除它后面的所有消息
+    // 情况一、编辑旧消息重新发送：
+    // 做了那些事情：
+    // 找到被找到被编辑的那条消息的位置
+    // 把它替换成新内容，删除它后面的所有消息
     // 重新构造一份“从开头到当前编辑消息”的上下文列表
     // 这样做的目的：
-
     // 让模型在重试时，不再带着旧的后续错误回答
     // 保持编辑后的最新上下文
     if (editingMessageId) {
+      //activeSession.messages 是当前会话中的所有消息数组；
+      // findIndex(...) 返回匹配到的索引，findIndex(...) 返回匹配到的索引
+      //找到当前要编辑的是会话中的第几条消息
       const editIndex = activeSession.messages.findIndex(
         (message) => message.id === editingMessageId,
       );
+      //替换、删除
       replaceMessage(activeSession.id, editingMessageId, userContent);
       removeMessagesAfter(activeSession.id, editingMessageId);
-      //把这部分裁剪出来然后替换被编辑的那条消息
       requestMessages = activeSession.messages
+        //只保留“从开头到当前编辑消息”为止的所有消息，不包括后面的消息
         .slice(0, editIndex + 1)
+        //替换成最新的userMessage，否则保持原样
+        //最后得到的就是最新输入的
         .map((message) =>
           message.id === editingMessageId ? userMessage : message,
         );
     } else {
-      //新消息
+      //情况二、 新消息发送：
+      //做了哪些事情：把新的用户消息追加到当前会话
+      //生成本次请求要发给后端的上下文列表
+      //之前的所有历史消息 + 这条新消息（保持上下文）
       addMessage(activeSession.id, userMessage);
       requestMessages = [...activeSession.messages, userMessage];
     }
 
+    //生成空白助手消息，并真正发送请求
     const assistantMessage: Message = {
       id: crypto.randomUUID(),
       role: "assistant",
@@ -536,6 +520,7 @@ export default function App() {
     setInput("");
     setAttachment(null);
     setEditingMessageId(null);
+    //发送请求
     await streamReply(activeSession, requestMessages, assistantMessage.id);
   }
 
@@ -603,7 +588,7 @@ export default function App() {
         >
           <MessageSquarePlus size={17} /> 新建分析
         </button>
-        <div className="mb-4 grid grid-cols-3 gap-1 rounded-md bg-slate-700 p-1">
+        <div className="mb-4 grid grid-cols-2 gap-1 rounded-md bg-slate-700 p-1">
           <button
             type="button"
             className={`rounded px-2 py-2 text-xs ${activeView === "chat" ? "bg-white text-slate-800" : "text-slate-200"}`}
@@ -617,13 +602,6 @@ export default function App() {
             onClick={() => setActiveView("match")}
           >
             匹配报告
-          </button>
-          <button
-            type="button"
-            className={`rounded px-2 py-2 text-xs ${activeView === "quiz" ? "bg-white text-slate-800" : "text-slate-200"}`}
-            onClick={() => setActiveView("quiz")}
-          >
-            八股检索
           </button>
         </div>
         <nav className="session-list" aria-label="历史会话">
@@ -670,18 +648,12 @@ export default function App() {
           </button>
           <div>
             <h1>
-              {activeView === "chat"
-                ? activeSession.title
-                : activeView === "match"
-                  ? "简历-JD 匹配报告"
-                  : "八股题检索"}
+              {activeView === "chat" ? activeSession.title : "简历-JD 匹配报告"}
             </h1>
             <p>
               {activeView === "chat"
                 ? "JD 解析与秋招准备"
-                : activeView === "match"
-                  ? "结构化分析与技能缺口识别"
-                  : "题库检索与 AI 八股解释"}
+                : "结构化分析与技能缺口识别"}
             </p>
           </div>
           {activeView === "chat" && (
@@ -705,9 +677,7 @@ export default function App() {
         </header>
 
         <section className="chat-panel">
-          {activeView === "quiz" ? (
-            <QuizSearchView clientId={clientId} />
-          ) : activeView === "match" ? (
+          {activeView === "match" ? (
             <MatchReportView
               report={analysisReport}
               history={analysisHistory}
@@ -851,7 +821,7 @@ export default function App() {
               </button>
             </div>
             <p className="composer-hint">
-              Enter 发送，Shift + Enter 换行。附件最多提取 16000 个字符，扫描版 PDF 会自动 OCR。
+              Enter 发送，Shift + Enter 换行。附件最多提取前 8000 个字符。
             </p>
           </footer>
         )}
